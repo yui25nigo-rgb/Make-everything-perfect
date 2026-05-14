@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>すべてを球にするゲーム - タイル画像背景版</title>
+<style>
+body { margin: 0; overflow: hidden; background: #111; font-family: sans-serif; color: white; }
+canvas { display: block; }
+
+/* スタート画面 */
+#startScreen {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; justify-content: center; align-items: center;
+  background: #111; z-index: 20;
+}
+.menuButton {
+  width: 260px; padding: 16px; margin: 10px;
+  border: none; border-radius: 12px; font-size: 20px;
+  cursor: pointer; background: #eee; font-weight: bold;
+}
+.menuButton:hover { background: #44aaff; color: white; }
+
+/* 上部の Enterで終了 ガイド */
+#topGuide {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 15;
+  font-size: 28px;
+  font-weight: bold;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 12px 40px;
+  border-radius: 50px;
+  border: 3px solid #44aaff;
+  color: white;
+  text-shadow: 2px 2px 4px black;
+  pointer-events: none;
+  display: none;
+  letter-spacing: 2px;
+}
+
+/* UI（操作説明）: 大きく、角丸、枠線あり */
+#ui {
+  position: absolute; 
+  top: 20px; 
+  left: 20px;
+  z-index: 10; 
+  font-size: 18px; 
+  line-height: 1.8;
+  text-shadow: 1px 1px 3px black;
+  background: rgba(0, 0, 0, 0.7); 
+  padding: 25px; 
+  border-radius: 20px; /* 角を丸くしたしかく */
+  border: 2px solid rgba(255, 255, 255, 0.3); /* 枠線 */
+  pointer-events: none;
+  box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+}
+#ui div, #ui input { pointer-events: auto; }
+.slider-container { margin-top: 15px; display: flex; flex-direction: column; }
+input[type=range] { width: 240px; cursor: pointer; margin-top: 5px; }
+
+/* 判定中・結果画面 */
+#loadingMsg {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  background: rgba(0,0,0,0.9); padding: 25px; border-radius: 15px;
+  border: 2px solid #008cff; text-align: center; display: none; z-index: 30;
+}
+#resultScreen {
+  position: absolute; inset: 0; display: none;
+  flex-direction: column; justify-content: center; align-items: center;
+  background: rgba(0,0,0,0.9); z-index: 30;
+}
+#resultText { font-size: 24px; margin: 30px; text-align: center; }
+#retryButton { padding: 16px 30px; font-size: 20px; border: none; border-radius: 12px; cursor: pointer; }
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+
+<body>
+
+<div id="startScreen">
+  <h1>すべてを球にする</h1>
+  <button class="menuButton" onclick="startGame('cube')">Level1 立方体</button>
+  <button class="menuButton" onclick="startGame('rect')">Level2 直方体</button>
+  <button class="menuButton" onclick="startGame('glb')">Level3 アヒル</button>
+  <div id="loadStatus" style="margin-top:20px; color:#888;"></div>
+</div>
+
+<div id="topGuide">Enterで終了</div>
+
+<div id="ui">
+  <strong>【操作説明】</strong><br>
+  左ドラッグ：粘土変形<br>
+  右ドラッグ：視点回転<br>
+  ホイール：ズーム<br>
+  <div class="slider-container">
+    <label for="brushSlider">ブラシ強度: <span id="brushVal">0.15</span></label>
+    <input type="range" id="brushSlider" min="0.01" max="0.50" step="0.01" value="0.15">
+  </div>
+</div>
+
+<div id="loadingMsg">判定中...<br><small>重心からの球体一致率を算出しています</small></div>
+
+<div id="resultScreen">
+  <h1>結果</h1>
+  <div id="resultText"></div>
+  <button id="retryButton" onclick="location.reload()">もう一度遊ぶ</button>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
+
+// --- シーン設定 ---
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+// --- ライティング ---
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const light1 = new THREE.DirectionalLight(0xffffff, 3.0);
+light1.position.set(5, 8, 5);
+scene.add(light1);
+const light2 = new THREE.DirectionalLight(0xffffff, 1.5);
+light2.position.set(-5, -2, -5);
+scene.add(light2);
+
+// --- 変数 ---
+let mesh = null;
+let initialBBox = new THREE.Box3();
+let brushPower = 0.15;
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+let dragging = false, rotating = false, gameStarted = false;
+let yaw = 0.8, pitch = 0.5, zoomDistance = 8, startTime = 0;
+
+const brushSlider = document.getElementById('brushSlider');
+const brushValDisplay = document.getElementById('brushVal');
+brushSlider.addEventListener('input', (e) => {
+  brushPower = parseFloat(e.target.value);
+  brushValDisplay.innerText = brushPower.toFixed(2);
+});
+
+function updateCameraPosition() {
+  camera.position.x = Math.sin(yaw) * Math.cos(pitch) * zoomDistance;
+  camera.position.y = Math.sin(pitch) * zoomDistance;
+  camera.position.z = Math.cos(yaw) * Math.cos(pitch) * zoomDistance;
+  camera.lookAt(0, 0, 0);
+}
+
+// --- ゲーム開始 ---
+window.startGame = function(type) {
+  const status = document.getElementById('loadStatus');
+  if (type === 'glb') {
+    status.innerText = "データ読み込み中...";
+    const texLoader = new THREE.TextureLoader();
+    texLoader.load('tile.jpg', (texture) => {
+      texture.colorSpace = THREE.SRGBColorSpace;
+      scene.background = texture;
+    });
+    const loader = new GLTFLoader();
+    loader.load('test.glb', (gltf) => {
+      let geometries = [];
+      let originalMaterial = null;
+      gltf.scene.traverse(child => {
+        if (child.isMesh) {
+          child.updateMatrixWorld();
+          if (!originalMaterial) originalMaterial = child.material;
+          let g = child.geometry.clone();
+          g.applyMatrix4(child.matrixWorld);
+          geometries.push(g.toNonIndexed());
+        }
+      });
+      if (geometries.length === 0) return;
+      const merged = BufferGeometryUtils.mergeGeometries(geometries);
+      merged.scale(1/30, 1/30, 1/30);
+      initMesh(merged, originalMaterial);
+    }, undefined, (e) => {
+      status.innerText = "エラー: test.glbが見つかりません。";
+    });
+  } else {
+    let geo;
+    if (type === 'cube') geo = new THREE.BoxGeometry(4, 4, 4, 30, 30, 30);
+    if (type === 'rect') geo = new THREE.BoxGeometry(2, 4, 4, 15, 30, 30);
+    const mat = new THREE.MeshStandardMaterial({ color: 0x66ccff, roughness: 0.5 });
+    initMesh(geo, mat);
+  }
+};
+
+function initMesh(geo, material) {
+  geo = BufferGeometryUtils.mergeVertices(geo, 0.0001);
+  geo.center();
+  geo.computeBoundingBox();
+  initialBBox.copy(geo.boundingBox);
+  initialBBox.expandByScalar(0.5);
+  mesh = new THREE.Mesh(geo, material);
+  scene.add(mesh);
+  document.getElementById("startScreen").style.display = "none";
+  document.getElementById("topGuide").style.display = "block";
+  gameStarted = true;
+  startTime = performance.now();
+  updateCameraPosition();
+}
+
+function deform(hitPoint) {
+  const pos = mesh.geometry.attributes.position;
+  const p = mesh.worldToLocal(hitPoint.clone());
+  const radius = 0.8;
+  for (let i = 0; i < pos.count; i++) {
+    const vx = pos.getX(i), vy = pos.getY(i), vz = pos.getZ(i);
+    const dx = vx - p.x, dy = vy - p.y, dz = vz - p.z;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (d < radius) {
+      const t = Math.pow(1 - d / radius, 2) * brushPower;
+      pos.setXYZ(i, vx - dx * t, vy - dy * t, vz - dz * t);
+    }
+  }
+  pos.needsUpdate = true;
+  mesh.geometry.computeVertexNormals();
+}
+
+// --- 判定ロジック ---
+function evaluate() {
+  if (!gameStarted || !mesh) return;
+  document.getElementById('loadingMsg').style.display = 'block';
+  document.getElementById("topGuide").style.display = "none";
+
+  setTimeout(() => {
+    const pos = mesh.geometry.attributes.position;
+    const count = pos.count;
+    let cx = 0, cy = 0, cz = 0;
+    for (let i = 0; i < count; i++) {
+      cx += pos.getX(i); cy += pos.getY(i); cz += pos.getZ(i);
+    }
+    cx /= count; cy /= count; cz /= count;
+    const cog = new THREE.Vector3(cx, cy, cz);
+    let sumDist = 0;
+    for (let i = 0; i < count; i++) {
+      sumDist += cog.distanceTo(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)));
+    }
+    const avgRadius = sumDist / count;
+    const res = 12; 
+    let matchPoints = 0, totalPoints = 0;
+    for (let x = 0; x <= res; x++) {
+      for (let y = 0; y <= res; y++) {
+        for (let z = 0; z <= res; z++) {
+          const px = initialBBox.min.x + (initialBBox.max.x - initialBBox.min.x) * (x / res);
+          const py = initialBBox.min.y + (initialBBox.max.y - initialBBox.min.y) * (y / res);
+          const pz = initialBBox.min.z + (initialBBox.max.z - initialBBox.min.z) * (z / res);
+          const p = new THREE.Vector3(px, py, pz);
+          const inSphere = p.distanceTo(cog) <= avgRadius;
+          const inMesh = checkInside(p, cog);
+          if (inSphere === inMesh) matchPoints++;
+          totalPoints++;
+        }
+      }
+    }
+    
+    // --- 数値の調整（厳格化） ---
+    const rawPercent = (matchPoints / totalPoints) * 100;
+    // 100%からのズレを2倍にする計算式
+    let matchPercent = 100 - (100 - rawPercent) * 2;
+    if (matchPercent < 0) matchPercent = 0;
+
+    const sec = (performance.now() - startTime) / 1000;
+    document.getElementById('loadingMsg').style.display = 'none';
+    document.getElementById("resultScreen").style.display = "flex";
+    document.getElementById("resultText").innerHTML = `一致率: ${matchPercent.toFixed(2)}%<br><small>理想の球半径: ${avgRadius.toFixed(2)}</small><br><br>経過時間: ${sec.toFixed(1)} 秒`;
+  }, 50);
+}
+
+function checkInside(point, cog) {
+  const distP = point.distanceTo(cog);
+  const dir = new THREE.Vector3().subVectors(point, cog).normalize();
+  const pos = mesh.geometry.attributes.position;
+  let maxVDist = 0, bestDot = -1;
+  for (let i = 0; i < pos.count; i += 5) {
+    const vx = pos.getX(i), vy = pos.getY(i), vz = pos.getZ(i);
+    const vDir = new THREE.Vector3(vx - cog.x, vy - cog.y, vz - cog.z).normalize();
+    const dot = dir.dot(vDir);
+    if (dot > bestDot) { bestDot = dot; maxVDist = cog.distanceTo(new THREE.Vector3(vx, vy, vz)); }
+    if (dot > 0.99) break;
+  }
+  return distP <= maxVDist;
+}
+
+// --- イベント ---
+window.addEventListener("wheel", (e) => {
+  if (!gameStarted) return;
+  zoomDistance += e.deltaY * 0.005;
+  zoomDistance = Math.max(2, Math.min(30, zoomDistance));
+  updateCameraPosition();
+}, { passive: false });
+window.addEventListener("keydown", (e) => { if (e.key === "Enter") evaluate(); });
+window.addEventListener("mousedown", (e) => {
+  if (!gameStarted || e.target.closest('#ui')) return;
+  if (e.button === 0) dragging = true;
+  if (e.button === 2) rotating = true;
+});
+window.addEventListener("mouseup", () => { dragging = false; rotating = false; });
+window.addEventListener("contextmenu", (e) => e.preventDefault());
+window.addEventListener("mousemove", (e) => {
+  if (!gameStarted) return;
+  if (rotating) {
+    yaw -= e.movementX * 0.007;
+    pitch = Math.max(-1.5, Math.min(1.5, pitch - e.movementY * 0.007));
+    updateCameraPosition();
+  }
+  if (dragging && mesh) {
+    mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+    const hit = raycaster.intersectObject(mesh);
+    if (hit.length > 0) deform(hit[0].point);
+  }
+});
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+function animate() { requestAnimationFrame(animate); renderer.render(scene, camera); }
+animate();
+</script>
+</body>
+</html>
